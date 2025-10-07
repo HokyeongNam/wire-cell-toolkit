@@ -123,12 +123,20 @@ function (anode, ts, prefix="dnnroi", output_scale=1.0, nticks=6000, tick_per_sl
           // Retagger also handles "frame" and "trace" like fanin/fanout
           // merge separately all traces like gaussN to gauss.
           frame: {
-            ".*": "dnnsp%d" % apaid
+            'dnnsp\\d[uvw]': 'dnnsp%d' % apaid,
+            ['gauss%d' % apaid]: 'gauss%d' % apaid,
+            ['wiener%d' % apaid]: 'wiener%d' % apaid,
+          },
+          trace: {
+            ['gauss%d' % apaid]: ['gauss%d' % apaid],
+            ['wiener%d' % apaid]: ['wiener%d' % apaid],
+          },
+          summary: {
+            ['wiener%d' % apaid]: ['wiener%d' % apaid],
           },
           merge: {
-            ".*": "dnnsp%d" % apaid
+            'dnnsp\\d[uvw]': 'dnnsp%d' % apaid,
           },
-        //   merge: {'dnnsp\\d[uvw]' : 'dnnsp%d' %apaid,},
         }],
       },
     }, nin=1, nout=1);
