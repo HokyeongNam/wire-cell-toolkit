@@ -21,6 +21,11 @@
 
 #include "WireCellUtil/NamedFactory.h"
 
+#include <algorithm>
+#include <iostream>
+#include <limits>
+#include <sstream>
+
 WIRECELL_FACTORY(OmnibusSigProc, WireCell::SigProc::OmnibusSigProc,
                  WireCell::INamed,
                  WireCell::IFrameFilter, WireCell::IConfigurable)
@@ -49,6 +54,105 @@ std::string WireCell::SigProc::OmnibusSigProc::OspChan::str() const
     std::stringstream ss;
     ss << "OspChan<c:" << channel << ",w:" << wire << ",p:" << plane << ",i:" << ident << ">";
     return ss.str();
+}
+
+void OmnibusSigProc::maybe_log_filter_config()
+{
+    std::stringstream ss;
+    ss << "ROI_tight_lf_filter=" << m_ROI_tight_lf_filter
+       << ", ROI_tighter_lf_filter=" << m_ROI_tighter_lf_filter
+       << ", ROI_loose_lf_filter=" << m_ROI_loose_lf_filter
+       << ", Gaus_wide_filter=" << m_Gaus_wide_filter
+       << ", Wiener_tight_filters=";
+    for (const auto& name : m_Wiener_tight_filters) ss << name << ";";
+    ss << ", Wiener_wide_filters=";
+    for (const auto& name : m_Wiener_wide_filters) ss << name << ";";
+    ss << ", Wire_filters=";
+    for (const auto& name : m_Wire_filters) ss << name << ";";
+
+    const auto signature = ss.str();
+    if (signature == m_last_filter_config_signature) return;
+    m_last_filter_config_signature = signature;
+    std::cout << "[OmnibusSigProc][filter-config] " << signature << std::endl;
+}
+
+void OmnibusSigProc::maybe_log_filter_waveform(const std::string& stage, int plane,
+                                               const std::string& filter_name,
+                                               const Waveform::realseq_t& wf)
+{
+    if (wf.empty()) return;
+
+    float min_v = std::numeric_limits<float>::max();
+    float max_v = std::numeric_limits<float>::lowest();
+    double sum = 0.0, sumsq = 0.0;
+    for (const float val : wf) {
+        min_v = std::min(min_v, val);
+        max_v = std::max(max_v, val);
+        sum += val;
+        sumsq += static_cast<double>(val) * val;
+    }
+
+    const auto nvals = wf.size();
+    const float first = wf.front();
+    const float middle = wf.at(nvals / 2);
+    const float last = wf.back();
+
+    std::stringstream sigss;
+    sigss << nvals << ":" << min_v << ":" << max_v << ":" << sum << ":" << sumsq
+          << ":" << first << ":" << middle << ":" << last;
+    const std::string signature = sigss.str();
+
+    const std::string key = stage + ":plane" + std::to_string(plane) + ":" + filter_name;
+    auto it = m_filter_waveform_signatures.find(key);
+    if (it != m_filter_waveform_signatures.end() && it->second == signature) return;
+    m_filter_waveform_signatures[key] = signature;
+
+    std::cout << "[OmnibusSigProc][filter-waveform] stage=" << stage
+              << " plane=" << plane
+              << " filter=" << filter_name
+              << " n=" << nvals
+              << " min=" << min_v
+              << " max=" << max_v
+              << " sum=" << sum
+              << " sumsq=" << sumsq
+              << " first=" << first
+              << " mid=" << middle
+              << " last=" << last
+              << std::endl;
+}
+
+void OmnibusSigProc::maybe_log_filter_parameters(const std::string& stage, const std::string& filter_name,
+                                                 const std::shared_ptr<IFilterWaveform>& filter_obj)
+{
+    auto cfgobj = std::dynamic_pointer_cast<IConfigurable>(filter_obj);
+    if (!cfgobj) {
+        return;
+    }
+
+    const auto cfg = cfgobj->default_configuration();
+    std::stringstream ss;
+    if (!cfg["sigma"].isNull()) ss << "sigma=" << cfg["sigma"].asDouble() << " ";
+    if (!cfg["power"].isNull()) ss << "power=" << cfg["power"].asDouble() << " ";
+    if (!cfg["flag"].isNull()) ss << "flag=" << cfg["flag"].asBool() << " ";
+    if (!cfg["max_freq"].isNull()) ss << "max_freq=" << cfg["max_freq"].asDouble() << " ";
+    if (!cfg["tau"].isNull()) ss << "tau=" << cfg["tau"].asDouble() << " ";
+
+    const std::string payload = ss.str();
+    if (payload.empty()) {
+        return;
+    }
+
+    const std::string key = stage + ":" + filter_name;
+    auto it = m_filter_parameter_signatures.find(key);
+    if (it != m_filter_parameter_signatures.end() && it->second == payload) {
+        return;
+    }
+    m_filter_parameter_signatures[key] = payload;
+
+    std::cout << "[OmnibusSigProc][filter-params] stage=" << stage
+              << " filter=" << filter_name
+              << " " << payload
+              << std::endl;
 }
 
 void OmnibusSigProc::configure(const WireCell::Configuration& config)
@@ -269,6 +373,8 @@ void OmnibusSigProc::configure(const WireCell::Configuration& config)
             ++osp_channel_number;
         }
     }
+
+    maybe_log_filter_config();
 }
 
 WireCell::Configuration OmnibusSigProc::default_configuration() const
@@ -1079,7 +1185,9 @@ void OmnibusSigProc::decon_2D_init(int plane)
     // const std::vector<std::string> filter_names{"Wire_ind", "Wire_ind", "Wire_col"};
     Waveform::realseq_t wire_filter_wf;
     auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wire_filters[plane]);
+    maybe_log_filter_parameters("decon_2D_init_wire", m_Wire_filters[plane], ncr1);
     wire_filter_wf = ncr1->filter_waveform(m_c_data[plane].rows());
+    maybe_log_filter_waveform("decon_2D_init_wire", plane, m_Wire_filters[plane], wire_filter_wf);
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
         for (int icol = 0; icol < m_c_data[plane].cols(); ++icol) {
             float val = abs(m_c_data[plane](irow, icol));
@@ -1226,7 +1334,9 @@ void OmnibusSigProc::decon_2D_ROI_refine(int plane)
     Waveform::realseq_t roi_hf_filter_wf;
 
     auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+    maybe_log_filter_parameters("decon_2D_ROI_refine", m_Wiener_tight_filters[plane], ncr1);
     roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
+    maybe_log_filter_waveform("decon_2D_ROI_refine", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
@@ -1250,9 +1360,12 @@ void OmnibusSigProc::decon_2D_tightROI(int plane)
     if (plane == 0) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_U");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tight_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tight_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_tightROI_lf", plane, m_ROI_tight_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1260,9 +1373,12 @@ void OmnibusSigProc::decon_2D_tightROI(int plane)
     else if (plane == 1) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_V");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tight_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tight_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_tightROI_lf", plane, m_ROI_tight_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1270,8 +1386,10 @@ void OmnibusSigProc::decon_2D_tightROI(int plane)
     else {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_W");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
+    maybe_log_filter_waveform("decon_2D_tightROI_hf", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
@@ -1296,9 +1414,12 @@ void OmnibusSigProc::decon_2D_tighterROI(int plane)
     if (plane == 0) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_U");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tighter_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tighter_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_tighterROI_lf", plane, m_ROI_tighter_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1306,9 +1427,12 @@ void OmnibusSigProc::decon_2D_tighterROI(int plane)
     else if (plane == 1) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_V");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tighter_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tighter_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_tighterROI_lf", plane, m_ROI_tighter_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1316,8 +1440,10 @@ void OmnibusSigProc::decon_2D_tighterROI(int plane)
     else {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_W");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
+    maybe_log_filter_waveform("decon_2D_tighterROI_hf", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
@@ -1347,18 +1473,24 @@ void OmnibusSigProc::decon_2D_looseROI(int plane)
     if (plane == 0) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_U");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_looseROI_hf_base", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
         roi_hf_filter_wf1 = roi_hf_filter_wf;
         {
             auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_loose_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_loose_lf_filter, ncr2);
             auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+            maybe_log_filter_waveform("decon_2D_looseROI_loose_lf", plane, m_ROI_loose_lf_filter, temp_filter);
             for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
                 roi_hf_filter_wf.at(i) *= temp_filter.at(i);
             }
         }
         {
             auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tight_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tight_lf_filter, ncr2);
             auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+            maybe_log_filter_waveform("decon_2D_looseROI_tight_lf", plane, m_ROI_tight_lf_filter, temp_filter);
             for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
                 roi_hf_filter_wf1.at(i) *= temp_filter.at(i);
             }
@@ -1367,18 +1499,24 @@ void OmnibusSigProc::decon_2D_looseROI(int plane)
     else if (plane == 1) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_V");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_looseROI_hf_base", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
         roi_hf_filter_wf1 = roi_hf_filter_wf;
         {
             auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_loose_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_loose_lf_filter, ncr2);
             auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+            maybe_log_filter_waveform("decon_2D_looseROI_loose_lf", plane, m_ROI_loose_lf_filter, temp_filter);
             for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
                 roi_hf_filter_wf.at(i) *= temp_filter.at(i);
             }
         }
         {
             auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_tight_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_tight_lf_filter, ncr2);
             auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+            maybe_log_filter_waveform("decon_2D_looseROI_tight_lf", plane, m_ROI_tight_lf_filter, temp_filter);
             for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
                 roi_hf_filter_wf1.at(i) *= temp_filter.at(i);
             }
@@ -1387,7 +1525,15 @@ void OmnibusSigProc::decon_2D_looseROI(int plane)
     else {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_W");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
+    }
+
+    maybe_log_filter_waveform("decon_2D_looseROI_hf", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
+    if (!roi_hf_filter_wf1.empty()) {
+        maybe_log_filter_waveform("decon_2D_looseROI_hf_alt", plane,
+                                  m_Wiener_tight_filters[plane] + "+" + m_ROI_tight_lf_filter,
+                                  roi_hf_filter_wf1);
     }
 
     const int n_lfn_nn = 2;
@@ -1426,9 +1572,12 @@ void OmnibusSigProc::decon_2D_looseROI_debug_mode(int plane)
     if (plane == 0) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_U");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_loose_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_loose_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_looseROI_debug_lf", plane, m_ROI_loose_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1436,9 +1585,12 @@ void OmnibusSigProc::decon_2D_looseROI_debug_mode(int plane)
     else if (plane == 1) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_V");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
         auto ncr2 = Factory::find<IFilterWaveform>("LfFilter", m_ROI_loose_lf_filter);
+            maybe_log_filter_parameters("runtime_lf", m_ROI_loose_lf_filter, ncr2);
         auto temp_filter = ncr2->filter_waveform(m_c_data[plane].cols());
+        maybe_log_filter_waveform("decon_2D_looseROI_debug_lf", plane, m_ROI_loose_lf_filter, temp_filter);
         for (size_t i = 0; i != roi_hf_filter_wf.size(); i++) {
             roi_hf_filter_wf.at(i) *= temp_filter.at(i);
         }
@@ -1446,8 +1598,11 @@ void OmnibusSigProc::decon_2D_looseROI_debug_mode(int plane)
     else {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_tight_W");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_tight_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_tight_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
+
+    maybe_log_filter_waveform("decon_2D_looseROI_debug_hf", plane, m_Wiener_tight_filters[plane], roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
@@ -1501,18 +1656,23 @@ void OmnibusSigProc::decon_2D_hits(int plane)
     if (plane == 0) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_wide_U");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_wide_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_wide_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
     else if (plane == 1) {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_wide_V");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_wide_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_wide_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
     else {
         // auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", "Wiener_wide_W");
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Wiener_wide_filters[plane]);
+        maybe_log_filter_parameters("runtime_hf", m_Wiener_wide_filters[plane], ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
+
+    maybe_log_filter_waveform("decon_2D_hits", plane, m_Wiener_wide_filters[plane], roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
@@ -1536,16 +1696,21 @@ void OmnibusSigProc::decon_2D_charge(int plane)
     Waveform::realseq_t roi_hf_filter_wf;
     if (plane == 0) {
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Gaus_wide_filter);
+        maybe_log_filter_parameters("runtime_hf", m_Gaus_wide_filter, ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
     else if (plane == 1) {
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Gaus_wide_filter);
+        maybe_log_filter_parameters("runtime_hf", m_Gaus_wide_filter, ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
     else {
         auto ncr1 = Factory::find<IFilterWaveform>("HfFilter", m_Gaus_wide_filter);
+        maybe_log_filter_parameters("runtime_hf", m_Gaus_wide_filter, ncr1);
         roi_hf_filter_wf = ncr1->filter_waveform(m_c_data[plane].cols());
     }
+
+    maybe_log_filter_waveform("decon_2D_charge", plane, m_Gaus_wide_filter, roi_hf_filter_wf);
 
     Array::array_xxc c_data_afterfilter(m_c_data[plane].rows(), m_c_data[plane].cols());
     for (int irow = 0; irow < m_c_data[plane].rows(); ++irow) {
