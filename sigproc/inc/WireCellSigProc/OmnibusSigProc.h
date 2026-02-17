@@ -8,6 +8,7 @@
 #include "WireCellIface/IAnodePlane.h"
 #include "WireCellIface/IDFT.h"
 #include "WireCellIface/IWaveform.h"
+#include "WireCellIface/IFilterWaveform.h"
 
 #include "WireCellUtil/Waveform.h"
 #include "WireCellUtil/Array.h"
