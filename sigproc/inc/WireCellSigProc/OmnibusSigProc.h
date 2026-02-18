@@ -8,12 +8,14 @@
 #include "WireCellIface/IAnodePlane.h"
 #include "WireCellIface/IDFT.h"
 #include "WireCellIface/IWaveform.h"
+#include "WireCellIface/IFilterWaveform.h"
 
 #include "WireCellUtil/Waveform.h"
 #include "WireCellUtil/Array.h"
 
 
 #include <list>
+#include <map>
 
 namespace WireCell {
     namespace SigProc {
@@ -100,6 +102,12 @@ namespace WireCell {
             //Unpad the data
             void unpad_data(int plane);
             void pad_data(int plane);
+            void maybe_log_filter_config();
+            void maybe_log_filter_waveform(const std::string& stage, int plane,
+                                           const std::string& filter_name,
+                                           const Waveform::realseq_t& wf);
+            void maybe_log_filter_parameters(const std::string& stage, const std::string& filter_name,
+                                             const std::shared_ptr<IFilterWaveform>& filter_obj);
 
             // Anode plane for geometry
             std::string m_anode_tn{"AnodePlane"};
@@ -264,6 +272,10 @@ namespace WireCell {
 
             size_t m_count{0};
             int m_verbose{0};
+
+            std::string m_last_filter_config_signature;
+            std::map<std::string, std::string> m_filter_waveform_signatures;
+            std::map<std::string, std::string> m_filter_parameter_signatures;
 
             IDFT::pointer m_dft;
 
